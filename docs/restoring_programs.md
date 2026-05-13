@@ -203,3 +203,30 @@ Mosh spawns a `mosh-client` process, so we need to specify that as the process t
     set -g @resurrect-processes 'mosh-client'
 
 Additionally a mosh-client strategy is provided to handle extracting the original arguments and re-run Mosh.
+
+### Restoring GitHub Copilot CLI sessions <a name="#copilot"></a>
+
+A `copilot_session` strategy is provided. It looks up the most recent
+Copilot session whose workspace `cwd` matches the pane's working directory
+and appends `--resume=<UUID>` to the restored command. Enable it with:
+
+    set -g @resurrect-processes '"~copilot"'
+    set -g @resurrect-strategy-copilot 'session'
+
+Flags that conflict with explicit session resumption (`--resume`,
+`--continue`, `--connect`, `--name`, `--acp`, `-i`/`--interactive`,
+`-p`/`--prompt`) are stripped from the saved argv. All other flags
+(`--autopilot`, `--allow-all-tools`, `--add-dir`, `--model`, `--agent`,
+MCP options, etc.) are preserved.
+
+To force-inject flags on every relaunch — useful for `--yolo` /
+`--allow-all-tools` which must always be present but may have been lost
+from the saved argv — set:
+
+    set -g @resurrect-strategy-copilot-default-flags '--yolo'
+
+Tokens already present in the saved argv are not duplicated. For
+value-bearing flags, prefer the `--flag=value` form
+(`--model=gpt-4`) over the space-separated form to avoid ambiguity
+when merging with the saved argv.
+

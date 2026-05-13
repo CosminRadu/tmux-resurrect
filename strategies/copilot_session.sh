@@ -13,9 +13,17 @@
 # session resumption. All other flags (--autopilot, --allow-all-tools,
 # --add-dir, --model, --agent, MCP options, etc.) are preserved.
 #
+# Additional flags can be force-injected via the tmux option
+# `@resurrect-strategy-copilot-default-flags` - useful for flags like
+# --yolo / --allow-all-tools that must be present on every relaunch but
+# may have been lost from the saved argv (e.g. because the user once
+# manually re-launched copilot without them). Tokens already present in
+# the saved argv are not duplicated, so this is idempotent across
+# repeated save/restore cycles.
+#
 # If no matching session is found on disk, the original command is
 # echoed unchanged - copilot relaunches fresh, same as without this
-# strategy.
+# strategy. Default flags are still injected in that case.
 
 ORIGINAL_COMMAND="$1"
 DIRECTORY="$2"
@@ -107,20 +115,53 @@ filter_argv() {
 	printf '%s\n' "${out[*]}"
 }
 
+# Return the "flag name" portion of a token: '--foo=bar' -> '--foo',
+# '--foo' -> '--foo', '-x' -> '-x', positional -> empty.
+flag_name() {
+	local tok="$1"
+	case "$tok" in
+		--*=*) echo "${tok%%=*}" ;;
+		--*|-?*) echo "$tok" ;;
+		*)     echo "" ;;
+	esac
+}
+
+# Read configured default-flags from tmux. Returns empty when unset or
+# when not running under tmux (e.g. invoked from a unit test).
+configured_default_flags() {
+	command -v tmux >/dev/null 2>&1 || return 0
+	tmux show-option -gqv "@resurrect-strategy-copilot-default-flags" 2>/dev/null
+}
+
+# Append each token from $default_flags to $argv unless a token with
+# the same flag-name is already present. Non-flag tokens are appended
+# as-is.
+merge_default_flags() {
+	local default_flags="$1"
+	shift
+	local -a argv=("$@")
+	local -a defaults
+	read -ra defaults <<< "$default_flags"
+
+	local def def_name existing have
+	for def in "${defaults[@]}"; do
+		def_name="$(flag_name "$def")"
+		have=0
+		if [ -n "$def_name" ]; then
+			for existing in "${argv[@]}"; do
+				[ "$(flag_name "$existing")" = "$def_name" ] && { have=1; break; }
+			done
+		fi
+		[ "$have" -eq 0 ] && argv+=("$def")
+	done
+	printf '%s\n' "${argv[*]}"
+}
+
 main() {
-	local target_dir target_resolved uuid filtered
-	local -a tokens
+	local target_dir target_resolved uuid filtered default_flags
+	local -a tokens filtered_tokens
 
 	if [ -z "$DIRECTORY" ]; then
-		echo "$ORIGINAL_COMMAND"
-		return 0
-	fi
-
-	target_dir="$DIRECTORY"
-	target_resolved="$(resolved_dir)"
-	uuid="$(find_session_uuid "$target_dir" "$target_resolved")"
-
-	if [ -z "$uuid" ]; then
 		echo "$ORIGINAL_COMMAND"
 		return 0
 	fi
@@ -129,12 +170,33 @@ main() {
 	# contain shell metacharacters; if they do, this is the same level
 	# of fidelity tmux-resurrect already provides for restored commands.
 	read -ra tokens <<< "$ORIGINAL_COMMAND"
-	filtered="$(filter_argv "${tokens[@]}")"
 
-	if [ -n "$filtered" ]; then
-		echo "${filtered} --resume=${uuid}"
-	else
-		echo "copilot --resume=${uuid}"
+	target_dir="$DIRECTORY"
+	target_resolved="$(resolved_dir)"
+	uuid="$(find_session_uuid "$target_dir" "$target_resolved")"
+
+	default_flags="$(configured_default_flags)"
+
+	if [ -z "$uuid" ]; then
+		# No matching session - echo original command, but still inject
+		# default flags so a fresh copilot relaunch gets e.g. --yolo.
+		if [ -n "$default_flags" ] && [ ${#tokens[@]} -gt 0 ]; then
+			merge_default_flags "$default_flags" "${tokens[@]}"
+		else
+			echo "$ORIGINAL_COMMAND"
+		fi
+		return 0
 	fi
+
+	filtered="$(filter_argv "${tokens[@]}")"
+	read -ra filtered_tokens <<< "$filtered"
+	# Ensure argv has at least the binary name before merging.
+	[ ${#filtered_tokens[@]} -eq 0 ] && filtered_tokens=("copilot")
+
+	if [ -n "$default_flags" ]; then
+		filtered="$(merge_default_flags "$default_flags" "${filtered_tokens[@]}")"
+	fi
+
+	echo "${filtered} --resume=${uuid}"
 }
 main
